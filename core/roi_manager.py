@@ -17,53 +17,31 @@ from typing import List, Dict
 from .models import ROI, ROISet
 
 # ─────────────────────────────────────────────
-# 설정
+# 설정: 프로젝트 폴더에 `roi_sets.json` 저장
 # ─────────────────────────────────────────────
-APP_DIR = Path.home() / "AppData" / "Roaming" / "PdfOcrExcel"
-APP_DIR.mkdir(parents=True, exist_ok=True)
 
-DATA_PATH = APP_DIR / "roi_sets.json"      # 모든 세트 저장 파일
+# 프로젝트 최상위 디렉터리를 기준으로 경로 설정
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DATA_PATH = ROOT_DIR / "roi_sets.json"
+# 파일이 없으면 생성
+DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not DATA_PATH.exists():
+    DATA_PATH.write_text(json.dumps({"sets": []}, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
-# ─────────────────────────────────────────────
-# ROIManager
-# ─────────────────────────────────────────────
 class ROIManager:
-    """좌표 세트 관리 + JSON 직렬화"""
-
-    _lock = threading.RLock()      # 파일 I/O 동시 접근 보호
-
+    """
+    ROIManager
+    ──────────
+    • ROISet을 관리하고, JSON으로 영속화
+    """
+    _lock = threading.Lock()
+    
     def __init__(self) -> None:
         self._sets: Dict[str, ROISet] = {}
         self._load()
 
-    # ─── Public API ──────────────────────────
-    def list_sets(self) -> List[str]:
-        """세트 이름 목록 반환"""
-        return list(self._sets.keys())
-
-    def get_set(self, set_name: str) -> ROISet | None:
-        """세트 이름으로 ROISet 반환 (없으면 None)"""
-        return self._sets.get(set_name)
-
-    def upsert_set(self, roi_set: ROISet) -> None:
-        """세트 추가 또는 덮어쓰기 후 저장"""
-        with self._lock:
-            self._sets[roi_set.set_name] = roi_set
-            self._save()
-
-    def delete_set(self, set_name: str) -> None:
-        """세트 삭제 후 저장"""
-        with self._lock:
-            if set_name in self._sets:
-                del self._sets[set_name]
-                self._save()
-
-    # ─── Internal: File I/O ──────────────────
     def _load(self) -> None:
         """JSON → 메모리"""
-        if not DATA_PATH.exists():
-            return
         try:
             data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
             for d in data.get("sets", []):
@@ -74,10 +52,26 @@ class ROIManager:
 
     def _save(self) -> None:
         """메모리 → JSON (pretty-print, 한글 보존)"""
-        data = {
-            "sets": [rs.to_dict() for rs in self._sets.values()]
-        }
+        data = {"sets": [rs.to_dict() for rs in self._sets.values()]}
         DATA_PATH.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+
+    # CRUD API
+    def list_sets(self) -> List[str]:
+        return list(self._sets.keys())
+
+    def get_set(self, name: str) -> ROISet | None:
+        return self._sets.get(name)
+
+    def upsert_set(self, rs: ROISet) -> None:
+        with self._lock:
+            self._sets[rs.set_name] = rs
+            self._save()
+
+    def delete_set(self, name: str) -> None:
+        with self._lock:
+            if name in self._sets:
+                del self._sets[name]
+                self._save()
