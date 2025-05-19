@@ -175,3 +175,14 @@ cython_debug/
 
 # 가상환경
 .venv/
+
+
+# --- 추가: Excel 및 PDF 파일 무시 ---
+# Excel
+*.xls
+*.xlsx
+*.xlsm
+*.xlsb
+
+# PDF
+*.pdf
