@@ -1,11 +1,7 @@
 # ui/tab_extract.py
+# 이 파일은 데이터 추출 탭을 정의하며, 선택한 PDF의 모든 페이지를 스캔하여
+# ROI에 매핑된 영역의 텍스트를 추출하고 엑셀로 저장하는 기능을 제공합니다.
 
-"""
-TabExtract
-──────────
-• PDF 파일을 로드하여 OCR을 수행하고 새 엑셀 파일에 결과를 저장하는 탭
-• ROI 이름 ↔ Excel 열 매핑 테이블 제공
-"""
 from __future__ import annotations
 from pathlib import Path
 
@@ -15,14 +11,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
-from openpyxl.utils.exceptions import CellCoordinatesException
-
-from core.models import ROI
-from core.roi_manager import ROIManager
-from core.exclusion_manager import ExclusionManager
-from core.ocr_engine import OCREngine
 from core.excel_writer import ExcelWriter
+from core.models import ROI, ROISet
+from openpyxl.utils.cell import column_index_from_string
+from core.ocr_engine import OCREngine
 
 
 class TabExtract(QWidget):
@@ -31,9 +23,7 @@ class TabExtract(QWidget):
         self.roi_mgr = roi_mgr
         self.ex_mgr = ex_mgr
         self.ocr = OCREngine()
-
         self.pdf_paths: list[Path] = []
-        self.excel_path: Path | None = None
 
         self._init_ui()
         # ROI 세트가 변경되면 매핑 테이블 갱신
@@ -61,22 +51,14 @@ class TabExtract(QWidget):
         h2.addWidget(btn_pdf)
         layout.addLayout(h2)
 
-        # 새 엑셀 파일 경로 표시 및 선택 (유지)
-        h3 = QHBoxLayout()
-        self.excel_label = QLabel("새 엑셀 파일: 없음")
-        btn_excel = QPushButton("새 엑셀 파일로 저장")
-        btn_excel.clicked.connect(self.on_select_excel)
-        h3.addWidget(self.excel_label)
-        h3.addWidget(btn_excel)
-        layout.addLayout(h3)
-
         # ROI ↔ Excel 열 매핑 테이블
-        self.map_table = QTableWidget(0, 2)
-        self.map_table.setHorizontalHeaderLabels(["ROI 이름", "열 주소 (예: A1)"])
+        self.map_table = QTableWidget()
+        self.map_table.setColumnCount(2)
+        self.map_table.setHorizontalHeaderLabels(["ROI 이름", "열 지정 (예: A, B, C)"])
         layout.addWidget(self.map_table)
 
-        # 실행 버튼
-        btn_run = QPushButton("OCR → Excel 실행")
+        # 추출 실행 버튼
+        btn_run = QPushButton("추출 시작")
         btn_run.clicked.connect(self.on_run)
         layout.addWidget(btn_run, alignment=Qt.AlignRight)
 
@@ -88,18 +70,102 @@ class TabExtract(QWidget):
             self.pdf_paths = [Path(p) for p in paths]
             self.pdf_label.setText(f"선택된 PDF: {len(paths)}개")
 
-    def on_select_excel(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
+    def on_run(self) -> None:
+        """OCR 실행 후 엑셀에 결과 저장"""
+        if not self.pdf_paths:
+            QMessageBox.warning(self, "경고", "PDF 파일을 먼저 선택하세요.")
+            return
+
+        # 저장할 엑셀 파일 선택
+        save_path, _ = QFileDialog.getSaveFileName(
             self,
-            "새 엑셀 파일로 저장",
+            "저장할 엑셀 파일 선택",
             "scanned_output.xlsx",
             "Excel Files (*.xlsx)"
         )
-        if path:
-            if not path.lower().endswith('.xlsx'):
-                path += '.xlsx'
-            self.excel_path = Path(path)
-            self.excel_label.setText(f"새 엑셀 파일: {self.excel_path.name}")
+        if not save_path:
+            return
+        if not save_path.lower().endswith('.xlsx'):
+            save_path += '.xlsx'
+        excel_path = Path(save_path)
+
+        # 새 워크북 생성
+        writer = ExcelWriter(excel_path, sheet_name="Sheet1")
+
+        # 셀 매핑 정보 수집 (열 지정만)
+        mapping: dict[str, int] = {}
+        for row in range(self.map_table.rowCount()):
+            name_item = self.map_table.item(row, 0)
+            col_item = self.map_table.item(row, 1)
+            if not name_item or not col_item:
+                continue
+            name = name_item.text().strip()
+            col_text = col_item.text().strip().upper()
+            if not col_text:
+                continue
+            if not col_text.isalpha():
+                QMessageBox.warning(
+                    self, "경고",
+                    f"잘못된 열 지정: {col_text}\n열은 A, B, C 등 알파벳만 입력해주세요."
+                )
+                return
+            try:
+                mapping[name] = column_index_from_string(col_text)
+            except Exception:
+                QMessageBox.warning(
+                    self, "경고",
+                    f"열 변환 오류: {col_text}"
+                )
+                return
+
+        # OCR 수행 및 Excel에 쓰기
+        set_name = self.set_selector.currentText()
+        roi_set = self.roi_mgr.get_set(set_name)
+        rois = getattr(roi_set, 'rois', [])
+
+        import fitz  # PyMuPDF
+        row_counter = 1
+        for pdf_path in self.pdf_paths:
+            doc = fitz.open(pdf_path)
+            for page_num in range(doc.page_count):
+                # 페이지 단위 결과 저장 dict
+                page_values: dict[tuple[int, int], str] = {}
+                # 단일 필드 OCR (첫 행에만)
+                for roi in rois:
+                    if getattr(roi, 'field_type', 'single') == 'single' and roi.name in mapping:
+                        text = self.ocr.extract_roi(
+                            pdf_path,
+                            page_num,
+                            (roi.x, roi.y, roi.w, roi.h),
+                            getattr(roi, 'tolerance', 0)
+                        )
+                        page_values[(row_counter, mapping[roi.name])] = text
+                # 표 형식 OCR
+                max_rows = 0
+                for roi in rois:
+                    if getattr(roi, 'field_type', '') == 'table' and roi.name in mapping:
+                        table = self.ocr.extract_table(
+                            pdf_path,
+                            page_num,
+                            (roi.x, roi.y, roi.w, roi.h)
+                        )
+                        # 테이블 각 행, 열을 순차적으로 해당 열부터 배치
+                        for i, row in enumerate(table):
+                            for j, cell_text in enumerate(row):
+                                page_values[(row_counter + i, mapping[roi.name] + j)] = cell_text
+                        max_rows = max(max_rows, len(table))
+                # 결과 워크북에 기록
+                writer.write_values(page_values)
+                # 다음 페이지 위치 이동
+                row_counter += max(max_rows, 1)
+
+        # 저장 및 완료 메시지
+        writer.save()
+        QMessageBox.information(
+            self,
+            "완료",
+            f"엑셀 파일이 생성되었습니다:\n{excel_path}"
+        )
 
     def _populate_mapping(self) -> None:
         """
@@ -116,73 +182,6 @@ class TabExtract(QWidget):
             self.map_table.setItem(i, 0, name_item)
             cell_item = QTableWidgetItem("")
             self.map_table.setItem(i, 1, cell_item)
-
-    def on_run(self) -> None:
-        """OCR 실행 후 새 엑셀에 결과 저장"""
-        # PDF 선택 확인
-        if not self.pdf_paths:
-            QMessageBox.warning(self, "경고", "PDF 파일을 먼저 선택하세요.")
-            return
-
-        # 저장 위치를 묻고 경로 설정
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "저장할 엑셀 파일 선택",
-            "scanned_output.xlsx",
-            "Excel Files (*.xlsx)"
-        )
-        if not save_path:
-            return
-        if not save_path.lower().endswith('.xlsx'):
-            save_path += '.xlsx'
-        self.excel_path = Path(save_path)
-        self.excel_label.setText(f"새 엑셀 파일: {self.excel_path.name}")
-
-        # 새 워크북 생성
-        writer = ExcelWriter(self.excel_path, sheet_name="Sheet1")
-
-        # 매핑 정보 수집 (문자열 주소 -> 튜플 좌표)
-        mapping: dict[str, tuple[int, int]] = {}
-        for row in range(self.map_table.rowCount()):
-            name = self.map_table.item(row, 0).text()
-            addr = self.map_table.item(row, 1).text().strip()
-            if not addr:
-                continue
-            try:
-                col, row_idx = coordinate_from_string(addr)
-                mapping[name] = (row_idx, column_index_from_string(col))
-            except CellCoordinatesException:
-                QMessageBox.warning(self, "경고", f"잘못된 셀 주소: {addr}")
-                return
-
-        # OCR 수행 및 엑셀에 쓰기
-        set_name = self.set_selector.currentText()
-        roi_set = self.roi_mgr.get_set(set_name)
-        rois = getattr(roi_set, 'rois', [])
-
-        for pdf_path in self.pdf_paths:
-            import fitz  # PyMuPDF
-            doc = fitz.open(pdf_path)
-            for page_num in range(doc.page_count):
-                for roi in rois:
-                    if roi.name not in mapping:
-                        continue
-                    box = (roi.x, roi.y, roi.w, roi.h)
-                    text = self.ocr.extract_roi(
-                        pdf_path,
-                        page_num,
-                        box,
-                        getattr(roi, 'tolerance', 0)
-                    )
-                    writer.write_values({mapping[roi.name]: text})
-
-        # 저장 및 완료 메시지
-        writer.save()
-        QMessageBox.information(
-            self,
-            "완료",
-            f"새 엑셀 파일이 생성되었습니다:\n{self.excel_path}"
-        )
 
     def refresh_sets(self) -> None:
         """
