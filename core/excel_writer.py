@@ -2,97 +2,97 @@
 """
 ExcelWriter
 ───────────
-• 모든 템플릿(.xls/.xlsx/.xlsm) openpyxl로 안전하게 처리
-• .xls 템플릿은 xlrd로 임시 .xlsx 변환 후 openpyxl 로드
-• append_row_by_header / append_row_by_column_letter
-  - column_letter가 'A81'처럼 숫자 포함 시, 문자만 추출
-• save_as_new → 항상 .xlsx로 저장하여 포맷/확장자 불일치 방지
+• 항상 새로운 엑셀(.xlsx) 워크북을 생성하여 데이터 기록
+• 단일 셀, 튜플 좌표, 표(table) 형식 동시 지원
+• 저장 시 지정한 경로에 .xlsx로 저장
 """
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
-from typing import Dict
-import tempfile
-import re
-
-import openpyxl
-from openpyxl.utils import column_index_from_string
-from openpyxl.workbook import Workbook
-
-import xlrd
+from openpyxl import Workbook
+from typing import Any, Dict, List, Union
 
 
 class ExcelWriter:
-    """엑셀 행 추가 헬퍼"""
+    """
+    새로운 워크북을 생성하여 데이터를 기록하고 저장하는 유틸리티 클래스
 
-    def __init__(self, template: str | Path):
-        self.template = Path(template)
-        ext = self.template.suffix.lower()
+    Attributes:
+        output_path (Path): 저장할 파일 경로
+        wb (Workbook): openpyxl 워크북 객체
+        ws (Worksheet): 현재 활성 시트 객체
+    """
 
-        if ext == '.xls':
-            # .xls 템플릿 → 임시 .xlsx 생성
-            book_xls = xlrd.open_workbook(str(self.template))
-            wb_new = Workbook()
-            # 기본 시트 제거
-            default = wb_new.active
-            wb_new.remove(default)
-            # 시트 복사
-            for sheet_name in book_xls.sheet_names():
-                sh = book_xls.sheet_by_name(sheet_name)
-                ws = wb_new.create_sheet(title=sheet_name)
-                for r in range(sh.nrows):
-                    for c in range(sh.ncols):
-                        ws.cell(row=r+1, column=c+1, value=sh.cell_value(r, c))
-            # 임시 파일로 저장 및 로드
-            tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
-            wb_new.save(tmp.name)
-            self.wb = openpyxl.load_workbook(tmp.name)
-        else:
-            # .xlsx, .xlsm 템플릿
-            self.wb = openpyxl.load_workbook(str(self.template))
-
-    def append_row_by_header(
+    def __init__(
         self,
-        sheet: str,
-        header_value: Dict[str, str],
-        header_row: int = 1
+        output_path: Union[str, Path],
+        sheet_name: str = "Sheet1"
     ):
-        ws = self.wb[sheet]
-        headers = {cell.value: cell.column for cell in ws[header_row] if cell.value}
-        new_row = ws.max_row + 1
-        for key, val in header_value.items():
-            col = headers.get(key)
-            if col:
-                ws.cell(row=new_row, column=col, value=val)
+        # 출력 경로 설정
+        self.output_path = Path(output_path)
+        # 새 워크북 생성 및 시트명 설정
+        self.wb = Workbook()
+        ws = self.wb.active
+        ws.title = sheet_name
+        self.ws = ws
 
-    def append_row_by_column_letter(
-        self,
-        sheet: str,
-        col_value: Dict[str, str]
-    ):
+    def write_values(self, values: Dict[Union[str, tuple[int, int]], Any]) -> None:
         """
-        col_value keys may include row numbers, e.g. 'A81'.
-        Extract column letters and ignore digits.
-        """
-        ws = self.wb[sheet]
-        new_row = ws.max_row + 1
-        for col_letter, val in col_value.items():
-            match = re.match(r"^([A-Za-z]+)", col_letter)
-            if not match:
-                continue
-            letters = match.group(1).upper()
-            try:
-                idx = column_index_from_string(letters)
-            except ValueError:
-                continue
-            ws.cell(row=new_row, column=idx, value=val)
+        단일 셀 또는 (row, col) 좌표 튜플에 값을 기록합니다.
 
-    def save_as_new(self, out_dir: str | Path | None = None) -> Path:
-        out_dir = Path(out_dir) if out_dir else self.template.parent
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        # 항상 .xlsx로 저장
-        new_name = f"{self.template.stem}_{ts}.xlsx"
-        out_path = out_dir / new_name
-        self.wb.save(str(out_path))
-        return out_path
+        Args:
+            values (Dict[Union[str, tuple[int, int]], Any]):
+                키로 엑셀 셀 주소 문자열(A1 등) 또는 (row, col) 1-based 튜플을 허용
+                값은 셀에 기록할 데이터
+        """
+        for cell, val in values.items():
+            if isinstance(cell, tuple) and len(cell) == 2 and all(isinstance(i, int) for i in cell):
+                # (row, column) 튜플 주소 처리
+                row, col = cell
+                self.ws.cell(row=row, column=col, value=val)
+            else:
+                # 문자열 주소(A1 등)
+                self.ws[cell] = val
+
+    def write_table(self, start_cell: str, table_data: List[List[Any]]) -> None:
+        """
+        표 형식 데이터를 지정한 시작 셀에서부터 기록합니다.
+
+        Args:
+            start_cell (str): 시작 셀 주소 (예: "A5")
+            table_data (List[List[Any]]): 2차원 리스트 형태의 테이블 데이터
+        """
+        # 열 문자와 행 번호 분리
+        col_letters = ''.join(filter(str.isalpha, start_cell))
+        row_number = int(''.join(filter(str.isdigit, start_cell)))
+        start_col = self._col_letter_to_index(col_letters)
+
+        # 테이블 데이터 기록
+        for r_idx, row in enumerate(table_data):
+            for c_idx, val in enumerate(row):
+                self.ws.cell(
+                    row=row_number + r_idx,
+                    column=start_col + c_idx,
+                    value=val
+                )
+
+    def save(self) -> None:
+        """
+        워크북을 지정된 경로에 .xlsx로 저장합니다.
+        """
+        # 확장자가 .xlsx가 아니면 자동 변경
+        if self.output_path.suffix.lower() != ".xlsx":
+            self.output_path = self.output_path.with_suffix(".xlsx")
+        self.wb.save(self.output_path)
+
+    def _col_letter_to_index(self, letters: str) -> int:
+        """
+        엑셀 열 문자를 숫자 인덱스(1-based)로 변환합니다.
+
+        예: A->1, B->2, ..., Z->26, AA->27
+        """
+        letters = letters.upper()
+        index = 0
+        for ch in letters:
+            index = index * 26 + (ord(ch) - ord('A') + 1)
+        return index

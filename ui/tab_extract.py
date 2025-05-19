@@ -1,148 +1,165 @@
 # ui/tab_extract.py
 """
-TabExtract  (PDF → OCR → Excel 탭, Drag&Drop 지원)
-───────────────────────────────────────────────────
-• ROI 세트 선택
-• PDF 파일(여러 개) 선택
-• 엑셀 선택 및 시트
-• 단일 필드 및 표(table) 처리 구분
-• 매핑 테이블에서 ‘엑셀 열’ 직접 입력
+TabExtract
+──────────
+• PDF 파일을 로드하여 OCR을 수행하고 새 엑셀 파일에 결과를 저장하는 탭
+• ROI 이름 ↔ Excel 열 매핑 테이블 제공
 """
 from __future__ import annotations
-
 from pathlib import Path
-from typing import Dict, List
 
-from PySide6.QtCore import Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QTableWidget, QTableWidgetItem, QMessageBox, QFileDialog
+    QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem, QComboBox
 )
+from PySide6.QtCore import Qt
 
-import fitz  # PyMuPDF
-from openpyxl import load_workbook
-
+from core.ocr_engine import OCREngine
+from core.excel_writer import ExcelWriter
 from core.roi_manager import ROIManager
 from core.exclusion_manager import ExclusionManager
-from core.ocr_engine import OCREngine
 
 
 class TabExtract(QWidget):
-    def __init__(
-        self,
-        roi_mgr: ROIManager,
-        ex_mgr: ExclusionManager,
-        parent=None
-    ):
-        super().__init__(parent)
+    def __init__(self, roi_mgr: ROIManager, ex_mgr: ExclusionManager):
+        super().__init__()
         self.roi_mgr = roi_mgr
         self.ex_mgr = ex_mgr
-        # 텍스트 전용, 테이블 전용 엔진 생성
-        self.ocr = OCREngine(dpi=600, lang="kor+eng", psm=6, oem=3)
-        self.pdf_paths: List[Path] = []
+        self.ocr = OCREngine()
+
+        self.pdf_paths: list[Path] = []
         self.excel_path: Path | None = None
 
-        # 위젯 초기화
-        self.cmb_set = QComboBox()
-        self.btn_pdf = QPushButton("PDF 선택")
-        self.lbl_pdf = QLabel("선택 없음")
-        self.btn_excel = QPushButton("엑셀 선택")
-        self.cmb_sheet = QComboBox()
-        self.table_map = QTableWidget(0, 2)
-        self.table_map.setHorizontalHeaderLabels(["필드", "엑셀 열"])
-        self.btn_run = QPushButton("변환 실행")
+        self._init_ui()
+        # ROI 세트 변경 시 매핑 재구성
+        self.set_selector.currentIndexChanged.connect(self._populate_mapping)
+        self._populate_mapping()
 
-        # 시그널
-        self.btn_pdf.clicked.connect(self.select_pdfs)
-        self.btn_excel.clicked.connect(self.select_excel)
-        self.btn_run.clicked.connect(self.run_conversion)
-        self.cmb_set.currentTextChanged.connect(self.populate_mapping)
-
-        # 레이아웃
+    def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        row1 = QHBoxLayout(); row1.addWidget(QLabel("ROI 세트:")); row1.addWidget(self.cmb_set)
-        row2 = QHBoxLayout(); row2.addWidget(self.btn_pdf); row2.addWidget(self.lbl_pdf)
-        row3 = QHBoxLayout(); row3.addWidget(self.btn_excel); row3.addWidget(self.cmb_sheet)
-        layout.addLayout(row1); layout.addLayout(row2); layout.addLayout(row3)
-        layout.addWidget(self.table_map); layout.addWidget(self.btn_run)
 
-        self.refresh_sets()
+        # ROI 세트 선택
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("ROI 세트:"), alignment=Qt.AlignVCenter)
+        self.set_selector = QComboBox()
+        self.set_selector.addItems(self.roi_mgr.list_sets())
+        h1.addWidget(self.set_selector)
+        layout.addLayout(h1)
 
-    @Slot()
-    def refresh_sets(self) -> None:
-        names = self.roi_mgr.list_sets()
-        self.cmb_set.blockSignals(True)
-        self.cmb_set.clear()
-        self.cmb_set.addItems(names)
-        self.cmb_set.blockSignals(False)
-        if names:
-            self.populate_mapping(self.cmb_set.currentText())
+        # PDF 파일 선택
+        h2 = QHBoxLayout()
+        self.pdf_label = QLabel("선택된 PDF: 없음")
+        btn_pdf = QPushButton("PDF 파일 선택")
+        btn_pdf.clicked.connect(self.on_select_pdf)
+        h2.addWidget(self.pdf_label)
+        h2.addWidget(btn_pdf)
+        layout.addLayout(h2)
 
-    @Slot(str)
-    def populate_mapping(self, set_name: str) -> None:
-        self.table_map.setRowCount(0)
-        rs = self.roi_mgr.get_set(set_name)
-        if not rs:
-            return
-        for roi in rs.rois:
-            row = self.table_map.rowCount()
-            self.table_map.insertRow(row)
-            self.table_map.setItem(row, 0, QTableWidgetItem(roi.name))
-            self.table_map.setItem(row, 1, QTableWidgetItem(""))
+        # 새 엑셀 파일 저장 경로 지정
+        h3 = QHBoxLayout()
+        self.excel_label = QLabel("새 엑셀 파일: 없음")
+        btn_excel = QPushButton("새 엑셀 파일로 저장")
+        btn_excel.clicked.connect(self.on_select_excel)
+        h3.addWidget(self.excel_label)
+        h3.addWidget(btn_excel)
+        layout.addLayout(h3)
 
-    def select_pdfs(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "PDF 파일 선택", "", "PDF Files (*.pdf)")
+        # ROI ↔ Excel 열 매핑 테이블
+        self.map_table = QTableWidget(0, 2)
+        self.map_table.setHorizontalHeaderLabels(["ROI 이름", "열 주소 (예: A1)"])
+        layout.addWidget(self.map_table)
+
+        # 실행 버튼
+        btn_run = QPushButton("OCR → Excel 실행")
+        btn_run.clicked.connect(self.on_run)
+        layout.addWidget(btn_run, alignment=Qt.AlignRight)
+
+    def on_select_pdf(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "PDF 파일 선택", "", "PDF Files (*.pdf)"
+        )
         if paths:
             self.pdf_paths = [Path(p) for p in paths]
-            self.lbl_pdf.setText(f"{len(paths)}개 선택")
+            self.pdf_label.setText(f"선택된 PDF: {len(paths)}개")
 
-    def select_excel(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel Files (*.xlsx)")
+    def on_select_excel(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "새 엑셀 파일로 저장",
+            "scanned_output.xlsx",
+            "Excel Files (*.xlsx)"
+        )
         if path:
+            if not path.lower().endswith('.xlsx'):
+                path += '.xlsx'
             self.excel_path = Path(path)
-            self.cmb_sheet.clear()
-            wb = load_workbook(self.excel_path)
-            self.cmb_sheet.addItems(wb.sheetnames)
+            self.excel_label.setText(f"새 엑셀 파일: {self.excel_path.name}")
 
-    def run_conversion(self) -> None:
-        set_name = self.cmb_set.currentText()
-        rs = self.roi_mgr.get_set(set_name)
-        if not rs or not self.pdf_paths or not self.excel_path:
-            QMessageBox.warning(self, "실행 불가", "모든 항목을 선택해주세요.")
+    def _populate_mapping(self) -> None:
+        """
+        선택된 ROI 세트의 ROI 리스트로 매핑 테이블 초기화
+        """
+        set_name = self.set_selector.currentText()
+        roi_set = self.roi_mgr.get_set(set_name)
+        if not roi_set:
             return
 
-        # 매핑
-        mapping: Dict[str, str] = {}
-        for r in range(self.table_map.rowCount()):
-            field = self.table_map.item(r, 0).text()
-            col = self.table_map.item(r, 1).text()
-            mapping[field] = col
+        rois = getattr(roi_set, 'rois', [])
+        self.map_table.setRowCount(len(rois))
+        for i, roi in enumerate(rois):
+            # ROI 이름
+            name_item = QTableWidgetItem(roi.name)
+            name_item.setFlags(Qt.ItemIsEnabled)
+            self.map_table.setItem(i, 0, name_item)
+            # 기본 열 주소 빈 값
+            cell_item = QTableWidgetItem("")
+            self.map_table.setItem(i, 1, cell_item)
 
-        wb = load_workbook(self.excel_path)
-        ws = wb[self.cmb_sheet.currentText()]
-        # 새 행 계산
-        last = max((ws.max_row if ws.max_row>1 else 1), 1) + 1
+    def on_run(self) -> None:
+        # 입력 검증
+        if not self.pdf_paths:
+            QMessageBox.warning(self, "경고", "PDF 파일을 먼저 선택하세요.")
+            return
+        if not self.excel_path:
+            QMessageBox.warning(self, "경고", "새 엑셀 파일을 지정하세요.")
+            return
 
-        for pdf in self.pdf_paths:
-            doc = fitz.open(pdf)
-            for p in range(doc.page_count):
-                for roi in rs.rois:
-                    if roi.field_type == 'table':
-                        # 테이블 전용 처리
-                        table_data = self.ocr.extract_table(
-                            pdf, p, (roi.x, roi.y, roi.w, roi.h)
-                        )
-                        # 각 셀을 엑셀에 씀
-                        for r_idx, row in enumerate(table_data, start=last):
-                            for c_idx, cell in enumerate(row, start=1):
-                                ws.cell(row=r_idx, column=c_idx, value=cell)
-                        last += len(table_data)
-                    else:
-                        # 단일 필드 처리
-                        text = self.ocr.extract_roi(
-                            pdf, p, (roi.x, roi.y, roi.w, roi.h), roi.tolerance
-                        )
-                        ws[f"{mapping[roi.name]}{last}"] = text
-                        last += 1
-        wb.save(self.excel_path)
-        QMessageBox.information(self, "완료", "변환이 완료되었습니다.")
+        # 새 워크북 생성
+        writer = ExcelWriter(self.excel_path, sheet_name="Sheet1")
+
+        # 매핑 정보 수집
+        mapping: dict[str, str] = {}
+        for row in range(self.map_table.rowCount()):
+            roi_name = self.map_table.item(row, 0).text()
+            cell_addr = self.map_table.item(row, 1).text().strip()
+            if cell_addr:
+                mapping[roi_name] = cell_addr
+
+        set_name = self.set_selector.currentText()
+        roi_set = self.roi_mgr.get_set(set_name)
+        rois = getattr(roi_set, 'rois', [])
+
+        # OCR 수행 및 엑셀 기록
+        for pdf_path in self.pdf_paths:
+            for roi in rois:
+                if roi.name not in mapping:
+                    continue
+                # OCR 추출 (page 0)
+                box = (roi.x, roi.y, roi.w, roi.h)
+                text = self.ocr.extract_roi(pdf_path, 0, box, getattr(roi, 'tolerance', 0))
+                # 기록
+                writer.write_values({mapping[roi.name]: text})
+
+        # 저장 및 알림
+        writer.save()
+        QMessageBox.information(
+            self, "완료", f"새 엑셀 파일이 생성되었습니다:\n{self.excel_path}"
+        )
+
+    def refresh_sets(self) -> None:
+        """
+        외부에서 ROI 세트 변경 시 호출
+        """
+        self.set_selector.clear()
+        self.set_selector.addItems(self.roi_mgr.list_sets())
+        self._populate_mapping()
