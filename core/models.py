@@ -1,80 +1,59 @@
 # core/models.py
 """
-데이터 계층의 기본 모델 정의
-─ ROI(좌표) · ROISet(좌표 세트) · ExclusionRule(제외 텍스트 규칙)
-직렬화 편의를 위해 dataclass + dict 변환 메서드 제공
+모델 정의: ROI, ROISet
 """
-
 from __future__ import annotations
-from dataclasses import dataclass, asdict
-from typing import List, Dict
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
 
-
-# ─────────────────────────────────────────────
-# 1. ROI (Region Of Interest) : 사각 좌표 하나
-# ─────────────────────────────────────────────
 @dataclass
 class ROI:
-    name: str               # “품명”, “수량” …
-    x: int                  # left   (PDF 픽셀 기준)
-    y: int                  # top
-    w: int                  # width
-    h: int                  # height
-    tolerance: int = 0      # 오차(px)
-    field_type: str = "single"      # "single" | "table"
-
-    # JSON 직렬화용
-    def to_dict(self) -> Dict:
-        return asdict(self)
+    name: str
+    x: int
+    y: int
+    w: int
+    h: int
+    tolerance: int = 0
+    field_type: str = 'single'
 
     @staticmethod
-    def from_dict(d: Dict) -> "ROI":
-        return ROI(**d)
+    def from_dict(d: Dict[str, Any]) -> ROI:
+        # JSON 키 호환성: 'w' 또는 'width', 'h' 또는 'height'
+        w = d.get('w', d.get('width'))
+        h = d.get('h', d.get('height'))
+        return ROI(
+            name=d['name'],
+            x=int(d['x']),
+            y=int(d['y']),
+            w=int(w),
+            h=int(h),
+            tolerance=int(d.get('tolerance', 0)),
+            field_type=d.get('field_type', 'single')
+        )
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'name': self.name,
+            'x': self.x,
+            'y': self.y,
+            'w': self.w,
+            'h': self.h,
+            'tolerance': self.tolerance,
+            'field_type': self.field_type
+        }
 
-# ─────────────────────────────────────────────
-# 2. ROISet : 좌표 여러 개를 이름으로 묶은 단위
-# ─────────────────────────────────────────────
 @dataclass
 class ROISet:
     set_name: str
-    rois: List[ROI]
-
-    def to_dict(self) -> Dict:
-        return {
-            "set_name": self.set_name,
-            "rois": [r.to_dict() for r in self.rois],
-        }
+    rois: List[ROI] = field(default_factory=list)
 
     @staticmethod
-    def from_dict(d: Dict) -> "ROISet":
-        return ROISet(
-            set_name=d["set_name"],
-            rois=[ROI.from_dict(r) for r in d["rois"]],
-        )
+    def from_dict(d: Dict[str, Any]) -> ROISet:
+        rois = [ROI.from_dict(rd) for rd in d.get('rois', [])]
+        return ROISet(set_name=d['set_name'], rois=rois)
 
-
-# ─────────────────────────────────────────────
-# 3. ExclusionRule : 특정 좌표 필드에서 제외할 텍스트
-#    - linked_fields : 같은 순서로 동시 제외할 필드 목록
-# ─────────────────────────────────────────────
-@dataclass
-class ExclusionRule:
-    target_field: str               # 예) "품명"
-    exclude_text: str               # 예) "견적"
-    linked_fields: List[str] = None # 예) ["수량"]
-
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "target_field": self.target_field,
-            "exclude_text": self.exclude_text,
-            "linked_fields": self.linked_fields or [],
+            'set_name': self.set_name,
+            'rois': [roi.to_dict() for roi in self.rois]
         }
-
-    @staticmethod
-    def from_dict(d: Dict) -> "ExclusionRule":
-        return ExclusionRule(
-            target_field=d["target_field"],
-            exclude_text=d["exclude_text"],
-            linked_fields=d.get("linked_fields", []),
-        )

@@ -97,33 +97,40 @@ class TabCoordinate(QWidget):
             self.sets_updated.emit()
 
     def on_save_set(self) -> None:
-        """현재 ROI를 새로운 세트로 저장"""
+        """현재 PDFViewer에 지정된 ROIItem들을 모델로 변환하여 저장"""
         name, ok = QInputDialog.getText(
             self,
             "세트 저장",
             "새 세트 이름:"
         )
-        if ok and name:
-            # 현재 PDFViewer에 지정된 ROIItem들을 모델로 변환
-            rois: list[ROI] = []
-            for item in self.viewer.export_rois().values():
-                rect = item.rect()
-                x = int(rect.x())
-                y = int(rect.y())
-                w = int(rect.width())
-                h = int(rect.height())
-                rois.append(
-                    ROI(
-                        name=item.name,
-                        x=x, y=y,
-                        w=w, h=h,
-                        tolerance=item.tolerance,
-                        field_type=item.field_type
-                    )
+        if not (ok and name):
+            return
+
+        # 로더에서 ROIItem 가져오기 (item.sceneBoundingRect 사용)
+        rois: list[ROI] = []
+        items = self.viewer.export_rois().values()
+        for item in items:
+            # sceneBoundingRect로 정확한 위치/크기 취득
+            rect = item.sceneBoundingRect()
+            x = int(rect.x())
+            y = int(rect.y())
+            w = int(rect.width())
+            h = int(rect.height())
+            # 로그로 확인
+            print(f"[TabCoordinate] Saving ROI '{item.name}' → x={x}, y={y}, w={w}, h={h}")
+            rois.append(
+                ROI(
+                    name=item.name,
+                    x=x, y=y,
+                    w=w, h=h,
+                    tolerance=item.tolerance,
+                    field_type=item.field_type
                 )
-            roi_set = ROISet(set_name=name, rois=rois)
-            self.roi_mgr.upsert_set(roi_set)
-            self._refresh_set_list()
-            self.cmb_set.setCurrentText(name)
-            self.set_changed.emit(name)
-            self.sets_updated.emit()
+            )
+
+        roi_set = ROISet(set_name=name, rois=rois)
+        self.roi_mgr.upsert_set(roi_set)
+        self._refresh_set_list()
+        self.cmb_set.setCurrentText(name)
+        self.set_changed.emit(name)
+        self.sets_updated.emit()

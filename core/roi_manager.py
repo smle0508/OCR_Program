@@ -42,13 +42,22 @@ class ROIManager:
 
     def _load(self) -> None:
         """JSON → 메모리"""
+        # 디버그: 실제 로드 경로 출력
+        print(f"[ROIManager] Loading ROI sets from: {DATA_PATH}")
         try:
             data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+            # 데이터 파싱 및 메모리에 저장
             for d in data.get("sets", []):
                 rs = ROISet.from_dict(d)
                 self._sets[rs.set_name] = rs
+            # 디버그: 로드된 세트와 ROI 출력
+            print(f"[ROIManager] Loaded sets:")
+            for name, rs in self._sets.items():
+                print(f"  - Set: {name}")
+                for roi in rs.rois:
+                    print(f"    ROI '{roi.name}': x={roi.x}, y={roi.y}, w={roi.w}, h={roi.h}")
         except Exception as e:
-            print(f"[ROIManager] JSON 로드 오류: {e}")
+            print(f"[ROIManager] JSON load error: {e}")
 
     def _save(self) -> None:
         """메모리 → JSON (pretty-print, 한글 보존)"""

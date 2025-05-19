@@ -1,0 +1,73 @@
+{
+  "sets": [
+    {
+      "set_name": "1212",
+      "rois": [
+        {
+          "name": "납품년원",
+          "x": 0,
+          "y": 0,
+          "w": 786,
+          "h": 85,
+          "tolerance": 3,
+          "field_type": "single"
+        },
+        {
+          "name": "품목",
+          "x": 0,
+          "y": 0,
+          "w": 870,
+          "h": 1445,
+          "tolerance": 0,
+          "field_type": "table"
+        }
+      ]
+    },
+    {
+      "set_name": "2323",
+      "rois": [
+        {
+          "name": "납품년원",
+          "x": 0,
+          "y": 0,
+          "w": 786,
+          "h": 85,
+          "tolerance": 3,
+          "field_type": "single"
+        },
+        {
+          "name": "품목",
+          "x": 0,
+          "y": 0,
+          "w": 870,
+          "h": 1445,
+          "tolerance": 0,
+          "field_type": "table"
+        }
+      ]
+    },
+    {
+      "set_name": "4545",
+      "rois": [
+        {
+          "name": "납품년월",
+          "x": 721,
+          "y": 472,
+          "w": 801,
+          "h": 88,
+          "tolerance": 3,
+          "field_type": "single"
+        },
+        {
+          "name": "품목",
+          "x": 314,
+          "y": 1428,
+          "w": 871,
+          "h": 1446,
+          "tolerance": 0,
+          "field_type": "table"
+        }
+      ]
+    }
+  ]
+}
