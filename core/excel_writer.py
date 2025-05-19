@@ -1,98 +1,169 @@
-# core/excel_writer.py
+# ui/tab_extract.py
 """
-ExcelWriter
-───────────
-• 항상 새로운 엑셀(.xlsx) 워크북을 생성하여 데이터 기록
-• 단일 셀, 튜플 좌표, 표(table) 형식 동시 지원
-• 저장 시 지정한 경로에 .xlsx로 저장
+TabExtract
+──────────
+• PDF 파일을 로드하여 OCR을 수행하고 새 엑셀 파일에 결과를 저장하는 탭
+• ROI 이름 ↔ Excel 열 매핑 테이블 제공
 """
 from __future__ import annotations
-
 from pathlib import Path
-from openpyxl import Workbook
-from typing import Any, Dict, List, Union
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem, QComboBox
+)
+from PySide6.QtCore import Qt
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+
+from core.ocr_engine import OCREngine
+from core.excel_writer import ExcelWriter
+from core.roi_manager import ROIManager
+from core.exclusion_manager import ExclusionManager
 
 
-class ExcelWriter:
-    """
-    새로운 워크북을 생성하여 데이터를 기록하고 저장하는 유틸리티 클래스
+class TabExtract(QWidget):
+    def __init__(self, roi_mgr: ROIManager, ex_mgr: ExclusionManager):
+        super().__init__()
+        self.roi_mgr = roi_mgr
+        self.ex_mgr = ex_mgr
+        self.ocr = OCREngine()
 
-    Attributes:
-        output_path (Path): 저장할 파일 경로
-        wb (Workbook): openpyxl 워크북 객체
-        ws (Worksheet): 현재 활성 시트 객체
-    """
+        self.pdf_paths: list[Path] = []
+        self.excel_path: Path | None = None
 
-    def __init__(
-        self,
-        output_path: Union[str, Path],
-        sheet_name: str = "Sheet1"
-    ):
-        # 출력 경로 설정
-        self.output_path = Path(output_path)
-        # 새 워크북 생성 및 시트명 설정
-        self.wb = Workbook()
-        ws = self.wb.active
-        ws.title = sheet_name
-        self.ws = ws
+        self._init_ui()
+        self.set_selector.currentIndexChanged.connect(self._populate_mapping)
+        self._populate_mapping()
 
-    def write_values(self, values: Dict[Union[str, tuple[int, int]], Any]) -> None:
+    def _init_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        # ROI 세트 선택
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("ROI 세트:"), alignment=Qt.AlignVCenter)
+        self.set_selector = QComboBox()
+        self.set_selector.addItems(self.roi_mgr.list_sets())
+        h1.addWidget(self.set_selector)
+        layout.addLayout(h1)
+
+        # PDF 파일 선택
+        h2 = QHBoxLayout()
+        self.pdf_label = QLabel("선택된 PDF: 없음")
+        btn_pdf = QPushButton("PDF 파일 선택")
+        btn_pdf.clicked.connect(self.on_select_pdf)
+        h2.addWidget(self.pdf_label)
+        h2.addWidget(btn_pdf)
+        layout.addLayout(h2)
+
+        # 새 엑셀 파일 저장 경로 지정
+        h3 = QHBoxLayout()
+        self.excel_label = QLabel("새 엑셀 파일: 없음")
+        btn_excel = QPushButton("새 엑셀 파일로 저장")
+        btn_excel.clicked.connect(self.on_select_excel)
+        h3.addWidget(self.excel_label)
+        h3.addWidget(btn_excel)
+        layout.addLayout(h3)
+
+        # ROI ↔ Excel 열 매핑 테이블
+        self.map_table = QTableWidget(0, 2)
+        self.map_table.setHorizontalHeaderLabels(["ROI 이름", "열 주소 (예: A1)"])
+        layout.addWidget(self.map_table)
+
+        # 실행 버튼
+        btn_run = QPushButton("OCR → Excel 실행")
+        btn_run.clicked.connect(self.on_run)
+        layout.addWidget(btn_run, alignment=Qt.AlignRight)
+
+    def on_select_pdf(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "PDF 파일 선택", "", "PDF Files (*.pdf)"
+        )
+        if paths:
+            self.pdf_paths = [Path(p) for p in paths]
+            self.pdf_label.setText(f"선택된 PDF: {len(paths)}개")
+
+    def on_select_excel(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "새 엑셀 파일로 저장",
+            "scanned_output.xlsx",
+            "Excel Files (*.xlsx)"
+        )
+        if path:
+            if not path.lower().endswith('.xlsx'):
+                path += '.xlsx'
+            self.excel_path = Path(path)
+            self.excel_label.setText(f"새 엑셀 파일: {self.excel_path.name}")
+
+    def _populate_mapping(self) -> None:
         """
-        단일 셀 또는 (row, col) 좌표 튜플에 값을 기록합니다.
-
-        Args:
-            values (Dict[Union[str, tuple[int, int]], Any]):
-                키로 엑셀 셀 주소 문자열(A1 등) 또는 (row, col) 1-based 튜플을 허용
-                값은 셀에 기록할 데이터
+        선택된 ROI 세트의 ROI 리스트로 매핑 테이블 초기화
         """
-        for cell, val in values.items():
-            if isinstance(cell, tuple) and len(cell) == 2 and all(isinstance(i, int) for i in cell):
-                # (row, column) 튜플 주소 처리
-                row, col = cell
-                self.ws.cell(row=row, column=col, value=val)
-            else:
-                # 문자열 주소(A1 등)
-                self.ws[cell] = val
+        set_name = self.set_selector.currentText()
+        roi_set = self.roi_mgr.get_set(set_name)
+        if not roi_set:
+            return
 
-    def write_table(self, start_cell: str, table_data: List[List[Any]]) -> None:
-        """
-        표 형식 데이터를 지정한 시작 셀에서부터 기록합니다.
+        rois = getattr(roi_set, 'rois', [])
+        self.map_table.setRowCount(len(rois))
+        for i, roi in enumerate(rois):
+            name_item = QTableWidgetItem(roi.name)
+            name_item.setFlags(Qt.ItemIsEnabled)
+            self.map_table.setItem(i, 0, name_item)
+            cell_item = QTableWidgetItem("")
+            self.map_table.setItem(i, 1, cell_item)
 
-        Args:
-            start_cell (str): 시작 셀 주소 (예: "A5")
-            table_data (List[List[Any]]): 2차원 리스트 형태의 테이블 데이터
-        """
-        # 열 문자와 행 번호 분리
-        col_letters = ''.join(filter(str.isalpha, start_cell))
-        row_number = int(''.join(filter(str.isdigit, start_cell)))
-        start_col = self._col_letter_to_index(col_letters)
+    def on_run(self) -> None:
+        # 입력 검증
+        if not self.pdf_paths:
+            QMessageBox.warning(self, "경고", "PDF 파일을 먼저 선택하세요.")
+            return
+        if not self.excel_path:
+            QMessageBox.warning(self, "경고", "새 엑셀 파일을 지정하세요.")
+            return
 
-        # 테이블 데이터 기록
-        for r_idx, row in enumerate(table_data):
-            for c_idx, val in enumerate(row):
-                self.ws.cell(
-                    row=row_number + r_idx,
-                    column=start_col + c_idx,
-                    value=val
-                )
+        # 새 워크북 생성
+        writer = ExcelWriter(self.excel_path, sheet_name="Sheet1")
 
-    def save(self) -> None:
-        """
-        워크북을 지정된 경로에 .xlsx로 저장합니다.
-        """
-        # 확장자가 .xlsx가 아니면 자동 변경
-        if self.output_path.suffix.lower() != ".xlsx":
-            self.output_path = self.output_path.with_suffix(".xlsx")
-        self.wb.save(self.output_path)
+                # 매핑 정보 수집 (문자열 주소 -> 튜플 좌표)
+        from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+        from openpyxl.utils.exceptions import CellCoordinatesException
+        mapping: dict[str, tuple[int, int]] = {}
+        for row in range(self.map_table.rowCount()):
+            roi_name = self.map_table.item(row, 0).text()
+            cell_addr = self.map_table.item(row, 1).text().strip()
+            if cell_addr:
+                try:
+                    col_letter, row_number = coordinate_from_string(cell_addr)
+                    col_idx = column_index_from_string(col_letter)
+                    mapping[roi_name] = (int(row_number), col_idx)
+                except CellCoordinatesException:
+                    # 유효하지 않은 셀 주소는 건너뜁니다
+                    continue
 
-    def _col_letter_to_index(self, letters: str) -> int:
-        """
-        엑셀 열 문자를 숫자 인덱스(1-based)로 변환합니다.
+        set_name = self.set_selector.currentText()
+        roi_set = self.roi_mgr.get_set(set_name)
+        rois = getattr(roi_set, 'rois', [])(roi_set, 'rois', [])
 
-        예: A->1, B->2, ..., Z->26, AA->27
+        # OCR 수행 및 엑셀 기록
+        for pdf_path in self.pdf_paths:
+            for roi in rois:
+                if roi.name not in mapping:
+                    continue
+                box = (roi.x, roi.y, roi.w, roi.h)
+                text = self.ocr.extract_roi(pdf_path, 0, box, getattr(roi, 'tolerance', 0))
+                writer.write_values({mapping[roi.name]: text})
+
+        # 저장 및 알림
+        writer.save()
+        QMessageBox.information(
+            self, "완료", f"새 엑셀 파일이 생성되었습니다:\n{self.excel_path}"
+        )
+
+    def refresh_sets(self) -> None:
         """
-        letters = letters.upper()
-        index = 0
-        for ch in letters:
-            index = index * 26 + (ord(ch) - ord('A') + 1)
-        return index
+        외부에서 ROI 세트 변경 시 호출
+        """
+        self.set_selector.clear()
+        self.set_selector.addItems(self.roi_mgr.list_sets())
+        self._populate_mapping()
