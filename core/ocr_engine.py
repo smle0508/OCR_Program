@@ -1,66 +1,129 @@
 # core/ocr_engine.py
 """
-OCR Engine 모듈 (ROI 좌표 픽셀 단위로 처리)
-PyMuPDF로 PDF에서 지정 영역을 렌더링하고, OpenCV 전처리 후 Tesseract로 텍스트 추출
-- PDF 렌더링 DPI = 600으로 고정
-- ROI 좌표는 UI에서 저장된 픽셀 좌표를 그대로 사용
-- 전처리: 그레이스케일→노이즈 제거(중간값 필터)→샤프닝
+OCR 엔진 래퍼
+────────────
+• PyMuPDF로 PDF 페이지를 이미지로 변환
+• 영역(Crop) → 전처리 → Tesseract 인식
+• 단일 필드(extract_roi) 및 테이블(extract_table) 지원
 """
-import cv2
+
+from __future__ import annotations
+import io
+from pathlib import Path
+from typing import Tuple, List
+
+import fitz           # PyMuPDF
 import numpy as np
+from PIL import Image, ImageFilter, ImageOps
 import pytesseract
-from PIL import Image
-import fitz  # PyMuPDF
+
 
 class OCREngine:
-    def __init__(self, dpi: int = 600, lang: str = 'kor+eng') -> None:
+    def __init__(
+        self,
+        dpi: int = 600,
+        lang: str = "kor+eng",
+        psm: int = 6,
+        oem: int = 3,
+        whitelist: str = ""
+    ) -> None:
         self.dpi = dpi
         self.lang = lang
-        # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        self.psm = psm
+        self.oem = oem
+        self.whitelist = whitelist
+
+    def _load_image(
+        self,
+        pdf_path: str | Path,
+        page_num: int
+    ) -> Image.Image:
+        # PDF 페이지를 PIL 이미지로 변환
+        doc = fitz.open(pdf_path)
+        page = doc[page_num]
+        mat = fitz.Matrix(self.dpi / 72, self.dpi / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.open(io.BytesIO(pix.tobytes()))
+        return img
+
+    def _preprocess(self, img: Image.Image, tol: int = 0) -> Image.Image:
+        # 그레이스케일 변환
+        gray = img.convert("L")
+        # 가우시안 블러
+        blurred = gray.filter(ImageFilter.GaussianBlur(radius=1))
+        # NumPy 배열로 thresholding
+        np_img = np.array(blurred)
+        thresh = np.mean(np_img)
+        bin_arr = (np_img > thresh).astype(np.uint8) * 255
+        bin_img = Image.fromarray(bin_arr)
+        # 팽창(Dilation)으로 획 강화
+        bin_img = bin_img.filter(ImageFilter.MaxFilter(3))
+        return bin_img
 
     def extract_roi(
         self,
-        pdf_path: str | fitz.Document,
+        pdf_path: str | Path,
         page_num: int,
-        rect: tuple[float, float, float, float],  # x_px, y_px, width_px, height_px
-        tol: int = 0  # 픽셀 단위
+        roi: Tuple[int, int, int, int],
+        tolerance: int = 0
     ) -> str:
-        # PDF 페이지 로드 후 렌더링 (600dpi)
-        close_doc = False
-        if not isinstance(pdf_path, fitz.Document):
-            doc = fitz.open(pdf_path)
-            close_doc = True
-        else:
-            doc = pdf_path
-        page = doc.load_page(page_num)
-        zoom = self.dpi / 72
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        """
+        단일 필드 OCR
+        roi=(x,y,w,h), tolerance 픽셀 여유 영역
+        """
+        img = self._load_image(pdf_path, page_num)
+        x, y, w, h = roi
+        x0 = max(0, x - tolerance)
+        y0 = max(0, y - tolerance)
+        x1 = min(img.width, x + w + tolerance)
+        y1 = min(img.height, y + h + tolerance)
+        cropped = img.crop((x0, y0, x1, y1))
+        proc = self._preprocess(cropped, tolerance)
+        # Tesseract config
+        config = f"--psm {self.psm} --oem {self.oem}"
+        if self.whitelist:
+            config += f" -c tessedit_char_whitelist={self.whitelist}"
+        text = pytesseract.image_to_string(
+            proc,
+            lang=self.lang,
+            config=config
+        )
+        return text.strip()
 
-        # ROI 좌표는 픽셀 단위 → 직접 사용
-        x, y, w, h = rect
-        x1 = max(int(x) - tol, 0)
-        y1 = max(int(y) - tol, 0)
-        x2 = min(int(x + w) + tol, img_cv.shape[1])
-        y2 = min(int(y + h) + tol, img_cv.shape[0])
-        roi = img_cv[y1:y2, x1:x2]
-
-        # 빈 영역 방지
-        if roi.size == 0:
-            return ""
-
-                # 전처리: 그레이스케일 → 샤프닝 (노이즈 제거 단계 제거)
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        processed = cv2.filter2D(gray, -1, kernel)
-
-        # OCR 추출
-        config = r"--oem 1 --psm 6"
-        text = pytesseract.image_to_string(processed, lang=self.lang, config=config)
-
-        # 문서 닫기
-        if close_doc:
-            doc.close()
-        return text
+    def extract_table(
+        self,
+        pdf_path: str | Path,
+        page_num: int,
+        roi: Tuple[int, int, int, int]
+    ) -> List[List[str]]:
+        """
+        테이블 영역 OCR → 2D 리스트 반환
+        pytesseract.image_to_data로 셀 감지
+        """
+        img = self._load_image(pdf_path, page_num)
+        x, y, w, h = roi
+        cropped = img.crop((x, y, x + w, y + h))
+        proc = self._preprocess(cropped)
+        config = f"--psm 6 --oem {self.oem}"
+        data = pytesseract.image_to_data(
+            proc,
+            lang=self.lang,
+            config=config,
+            output_type=pytesseract.Output.DICT
+        )
+        # 행 단위 그룹화
+        n_boxes = len(data['level'])
+        rows: dict[int, List[tuple[int, str]]] = {}
+        for i in range(n_boxes):
+            text = data['text'][i].strip()
+            if not text:
+                continue
+            top = data['top'][i]
+            left = data['left'][i]
+            # row key based on top coordinate
+            rows.setdefault(top, []).append((left, text))
+        table: List[List[str]] = []
+        for top in sorted(rows.keys()):
+            cells = [t for _, t in sorted(rows[top], key=lambda x: x[0])]
+            table.append(cells)
+        return table

@@ -3,10 +3,10 @@
 TabExtract  (PDF → OCR → Excel 탭, Drag&Drop 지원)
 ───────────────────────────────────────────────────
 • ROI 세트 선택
-• PDF 파일(여러 개) 선택  ─ 버튼·Drag&Drop 모두 지원
-• 엑셀 파일 + 시트 선택  ─ 버튼·Drag&Drop 모두 지원
+• PDF 파일(여러 개) 선택
+• 엑셀 선택 및 시트
+• 단일 필드 및 표(table) 처리 구분
 • 매핑 테이블에서 ‘엑셀 열’ 직접 입력
-• 전역 제외 문자열 적용 후 원본 보존 + 새 파일로 저장
 """
 from __future__ import annotations
 
@@ -37,13 +37,13 @@ class TabExtract(QWidget):
         super().__init__(parent)
         self.roi_mgr = roi_mgr
         self.ex_mgr = ex_mgr
-        self.ocr = OCREngine(dpi=600, lang="kor+eng")
+        # 텍스트 전용, 테이블 전용 엔진 생성
+        self.ocr = OCREngine(dpi=600, lang="kor+eng", psm=6, oem=3)
         self.pdf_paths: List[Path] = []
         self.excel_path: Path | None = None
 
         # 위젯 초기화
         self.cmb_set = QComboBox()
-        self.cmb_set.currentTextChanged.connect(self.populate_mapping)
         self.btn_pdf = QPushButton("PDF 선택")
         self.lbl_pdf = QLabel("선택 없음")
         self.btn_excel = QPushButton("엑셀 선택")
@@ -52,53 +52,21 @@ class TabExtract(QWidget):
         self.table_map.setHorizontalHeaderLabels(["필드", "엑셀 열"])
         self.btn_run = QPushButton("변환 실행")
 
-        # 버튼 시그널 연결
+        # 시그널
         self.btn_pdf.clicked.connect(self.select_pdfs)
         self.btn_excel.clicked.connect(self.select_excel)
         self.btn_run.clicked.connect(self.run_conversion)
+        self.cmb_set.currentTextChanged.connect(self.populate_mapping)
 
-        # 레이아웃 구성
+        # 레이아웃
         layout = QVBoxLayout(self)
-        # ROI 세트
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("ROI 세트:"))
-        row1.addWidget(self.cmb_set)
-        layout.addLayout(row1)
-        # PDF 선택
-        row2 = QHBoxLayout()
-        row2.addWidget(self.btn_pdf)
-        row2.addWidget(self.lbl_pdf)
-        layout.addLayout(row2)
-        # 엑셀 선택
-        row3 = QHBoxLayout()
-        row3.addWidget(self.btn_excel)
-        row3.addWidget(self.cmb_sheet)
-        layout.addLayout(row3)
-        # 매핑 테이블
-        layout.addWidget(self.table_map)
-        # 실행 버튼
-        layout.addWidget(self.btn_run)
+        row1 = QHBoxLayout(); row1.addWidget(QLabel("ROI 세트:")); row1.addWidget(self.cmb_set)
+        row2 = QHBoxLayout(); row2.addWidget(self.btn_pdf); row2.addWidget(self.lbl_pdf)
+        row3 = QHBoxLayout(); row3.addWidget(self.btn_excel); row3.addWidget(self.cmb_sheet)
+        layout.addLayout(row1); layout.addLayout(row2); layout.addLayout(row3)
+        layout.addWidget(self.table_map); layout.addWidget(self.btn_run)
 
-        # 초기 세트 로드
         self.refresh_sets()
-
-    def select_pdfs(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "PDF 파일 선택", "", "PDF Files (*.pdf)"
-        )
-        if paths:
-            self.pdf_paths = [Path(p) for p in paths]
-            self.lbl_pdf.setText(f"{len(paths)}개 선택")
-
-    def select_excel(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "엑셀 파일 선택", "", "Excel Files (*.xlsx *.xlsm)"
-        )
-        if path:
-            self.excel_path = Path(path)
-            self.cmb_sheet.clear()
-            wb = load_workbook(self.excel_path)
-            self.cmb_sheet.addItems(wb.sheetnames)
 
     @Slot()
     def refresh_sets(self) -> None:
@@ -122,43 +90,59 @@ class TabExtract(QWidget):
             self.table_map.setItem(row, 0, QTableWidgetItem(roi.name))
             self.table_map.setItem(row, 1, QTableWidgetItem(""))
 
+    def select_pdfs(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "PDF 파일 선택", "", "PDF Files (*.pdf)")
+        if paths:
+            self.pdf_paths = [Path(p) for p in paths]
+            self.lbl_pdf.setText(f"{len(paths)}개 선택")
+
+    def select_excel(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel Files (*.xlsx)")
+        if path:
+            self.excel_path = Path(path)
+            self.cmb_sheet.clear()
+            wb = load_workbook(self.excel_path)
+            self.cmb_sheet.addItems(wb.sheetnames)
+
     def run_conversion(self) -> None:
         set_name = self.cmb_set.currentText()
         rs = self.roi_mgr.get_set(set_name)
-        if not rs:
-            QMessageBox.warning(self, "실행 불가", "ROI 세트 선택 필요")
-            return
-        if not self.pdf_paths or not self.excel_path:
-            QMessageBox.warning(self, "실행 불가", "PDF/엑셀 선택 필요")
+        if not rs or not self.pdf_paths or not self.excel_path:
+            QMessageBox.warning(self, "실행 불가", "모든 항목을 선택해주세요.")
             return
 
-        mapping: Dict[str, str] = {
-            self.table_map.item(r, 0).text(): self.table_map.item(r, 1).text()
-            for r in range(self.table_map.rowCount())
-        }
+        # 매핑
+        mapping: Dict[str, str] = {}
+        for r in range(self.table_map.rowCount()):
+            field = self.table_map.item(r, 0).text()
+            col = self.table_map.item(r, 1).text()
+            mapping[field] = col
 
         wb = load_workbook(self.excel_path)
         ws = wb[self.cmb_sheet.currentText()]
-
-        last = max(
-            (next((i for i in range(ws.max_row, 0, -1)
-                    if ws.cell(i, ws[f"{c}1"].column).value not in (None, "")), 0)
-             for c in mapping.values()),
-            default=0
-        ) + 1
+        # 새 행 계산
+        last = max((ws.max_row if ws.max_row>1 else 1), 1) + 1
 
         for pdf in self.pdf_paths:
             doc = fitz.open(pdf)
             for p in range(doc.page_count):
                 for roi in rs.rois:
-                    # 디버그: 실제 크롭 좌표 및 페이지 정보 출력
-                    print(f"[ExtractTab] Cropping PDF={pdf.name}, page={p}, "
-                          f"x={roi.x}, y={roi.y}, w={roi.w}, h={roi.h}, tol={roi.tolerance}")
-                    text = self.ocr.extract_roi(
-                        pdf, p, (roi.x, roi.y, roi.w, roi.h), roi.tolerance
-                    )
-                    ws[f"{mapping[roi.name]}{last}"] = text
-                last += 1
-
+                    if roi.field_type == 'table':
+                        # 테이블 전용 처리
+                        table_data = self.ocr.extract_table(
+                            pdf, p, (roi.x, roi.y, roi.w, roi.h)
+                        )
+                        # 각 셀을 엑셀에 씀
+                        for r_idx, row in enumerate(table_data, start=last):
+                            for c_idx, cell in enumerate(row, start=1):
+                                ws.cell(row=r_idx, column=c_idx, value=cell)
+                        last += len(table_data)
+                    else:
+                        # 단일 필드 처리
+                        text = self.ocr.extract_roi(
+                            pdf, p, (roi.x, roi.y, roi.w, roi.h), roi.tolerance
+                        )
+                        ws[f"{mapping[roi.name]}{last}"] = text
+                        last += 1
         wb.save(self.excel_path)
         QMessageBox.information(self, "완료", "변환이 완료되었습니다.")
